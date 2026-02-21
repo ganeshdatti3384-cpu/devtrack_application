@@ -1,0 +1,131 @@
+name: DevTrack Fullstack Production CI/CD
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  REGISTRY: docker.io
+  BACKEND_IMAGE: devtrack-backend
+  FRONTEND_IMAGE: devtrack-frontend
+
+jobs:
+
+# =========================================
+# BUILD BACKEND IMAGE
+# =========================================
+  build-backend:
+    runs-on: ubuntu-latest
+    outputs:
+      backend_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Backend Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.BACKEND_IMAGE }}
+          tags: type=sha
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+# =========================================
+# BUILD FRONTEND IMAGE
+# =========================================
+  build-frontend:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend_tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Frontend Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ secrets.DOCKERHUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}
+          tags: type=sha
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+# =========================================
+# DEPLOY USING OIDC + SSM
+# =========================================
+  deploy:
+    needs: [build-backend, build-frontend]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::074122282902:role/devtract_role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: DevTrackDeploySession
+
+      - name: Deploy via SSM
+        run: |
+
+          COMMAND_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=instanceIds,Values=${{ secrets.EC2_INSTANCE_ID }}" \
+            --parameters commands="[
+              \"set -e\",
+
+              \"export DOCKER_USER=${{ secrets.DOCKERHUB_USERNAME }}\",
+              \"export DOCKER_PASS=${{ secrets.DOCKERHUB_PASSWORD }}\",
+              \"export BACKEND_TAG=${{ needs.build-backend.outputs.backend_tag }}\",
+              \"export FRONTEND_TAG=${{ needs.build-frontend.outputs.frontend_tag }}\",
+
+              \"echo \$DOCKER_PASS | docker login docker.io -u \$DOCKER_USER --password-stdin\",
+
+              \"docker pull docker.io/\$DOCKER_USER/devtrack-backend:\$BACKEND_TAG\",
+              \"docker pull docker.io/\$DOCKER_USER/devtrack-frontend:\$FRONTEND_TAG\",
+
+              \"cd /home/ec2-user/devtrack_application\",
+
+              \"docker compose down\",
+              \"docker compose up -d\",
+
+              \"docker image prune -af || true\"
+            ]" \
+            --query "Command.CommandId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          aws ssm wait command-executed \
+            --command-id $COMMAND_ID \
+            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
+            --region ${{ env.AWS_REGION }}
