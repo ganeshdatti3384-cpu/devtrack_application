@@ -4,26 +4,40 @@ services:
 
   postgres:
     image: postgres:15
+    container_name: devtrack-postgres
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: devtrack
     volumes:
       - db-data:/var/lib/postgresql/data
+    restart: always
 
   redis:
     image: redis:7
+    container_name: devtrack-redis
+    restart: always
 
   backend:
-    build: ./backend
+    image: docker.io/${DOCKER_USER}/devtrack-backend:${BACKEND_TAG}
+    container_name: devtrack-backend
+    environment:
+      DB_HOST: postgres
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
     depends_on:
       - postgres
       - redis
+    restart: always
 
   frontend:
-    build: ./frontend
+    image: docker.io/${DOCKER_USER}/devtrack-frontend:${FRONTEND_TAG}
+    container_name: devtrack-frontend
+    restart: always
 
   nginx:
     image: nginx:alpine
+    container_name: devtrack-nginx
     ports:
       - "80:80"
     volumes:
@@ -31,6 +45,7 @@ services:
     depends_on:
       - backend
       - frontend
+    restart: always
 
 volumes:
   db-data:
