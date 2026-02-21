@@ -1,6 +1,5 @@
 name: DevTrack Fullstack Production CI/CD
 
-
 on:
   push:
     branches: [ main ]
@@ -17,9 +16,9 @@ env:
 
 jobs:
 
-# =========================================
-# BUILD BACKEND IMAGE
-# =========================================
+# ============================
+# BUILD BACKEND
+# ============================
   build-backend:
     runs-on: ubuntu-latest
     outputs:
@@ -49,9 +48,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
-# =========================================
-# BUILD FRONTEND IMAGE
-# =========================================
+# ============================
+# BUILD FRONTEND
+# ============================
   build-frontend:
     runs-on: ubuntu-latest
     outputs:
@@ -81,59 +80,66 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
 
-# =========================================
-# DEPLOY USING OIDC + SSM
-# =========================================
+# ============================
+# DEPLOY USING SSM
+# ============================
   deploy:
     needs: [build-backend, build-frontend]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Configure AWS via OIDC
+
+      - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::074122282902:role/devtract_role
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: DevTrackDeploySession
 
-      - name: Deploy via SSM
-  run: |
+      - name: Deploy via AWS SSM
+        run: |
 
-    COMMAND_ID=$(aws ssm send-command \
-      --document-name "AWS-RunShellScript" \
-      --targets "Key=instanceIds,Values=${{ secrets.EC2_INSTANCE_ID }}" \
-      --parameters commands='[
-        "echo Starting deployment",
-        "whoami",
-        "pwd",
-        "docker --version",
-        "docker compose version || echo compose not found",
+          COMMAND_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=instanceIds,Values=${{ secrets.EC2_INSTANCE_ID }}" \
+            --region ${{ env.AWS_REGION }} \
+            --parameters 'commands=[
+              "set -e",
 
-        "export DOCKER_USER=${{ secrets.DOCKERHUB_USERNAME }}",
-        "export DOCKER_PASS=${{ secrets.DOCKERHUB_PASSWORD }}",
-        "export BACKEND_TAG=sha-2c681ad",
-        "export FRONTEND_TAG=sha-2c681ad",
+              "echo === STARTING DEPLOYMENT ===",
 
-        "echo $DOCKER_PASS | docker login docker.io -u $DOCKER_USER --password-stdin",
+              "cd /home/ubuntu/devtrack_application",
 
-        "docker pull docker.io/$DOCKER_USER/devtrack-backend:$BACKEND_TAG || echo backend pull failed",
-        "docker pull docker.io/$DOCKER_USER/devtrack-frontend:$FRONTEND_TAG || echo frontend pull failed",
+              "export DOCKER_USER=${{ secrets.DOCKERHUB_USERNAME }}",
+              "export BACKEND_TAG=${{ needs.build-backend.outputs.backend_tag }}",
+              "export FRONTEND_TAG=${{ needs.build-frontend.outputs.frontend_tag }}",
 
-        "ls /home/ec2-user",
-        "cd /home/ec2-user/devtrack_application || echo folder not found",
+              "echo Logging into DockerHub...",
+              "echo ${{ secrets.DOCKERHUB_PASSWORD }} | docker login docker.io -u ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin",
 
-        "docker compose down || echo compose down failed",
-        "docker compose up -d || echo compose up failed",
+              "echo Pulling latest images...",
+              "docker pull docker.io/$DOCKER_USER/devtrack-backend:$BACKEND_TAG",
+              "docker pull docker.io/$DOCKER_USER/devtrack-frontend:$FRONTEND_TAG",
 
-        "echo Deployment finished"
-      ]' \
-      --query "Command.CommandId" \
-      --output text \
-      --region ${{ env.AWS_REGION }})
+              "echo Stopping old containers...",
+              "docker-compose down || true",
 
-    sleep 10
+              "echo Starting new containers...",
+              "docker-compose up -d",
 
-    aws ssm get-command-invocation \
-      --command-id $COMMAND_ID \
-      --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
-      --region ${{ env.AWS_REGION }}
+              "echo Cleaning unused images...",
+              "docker image prune -af || true",
+
+              "echo === DEPLOYMENT SUCCESSFUL ==="
+            ]' \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: $COMMAND_ID"
+
+          aws ssm wait command-executed \
+            --command-id $COMMAND_ID \
+            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Deployment completed successfully."
