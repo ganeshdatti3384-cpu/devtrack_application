@@ -1,0 +1,47 @@
+name: DevTrack Production Deploy
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::074122282902:role/devtract_role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy via SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --targets "Key=instanceIds,Values=${{ secrets.EC2_INSTANCE_ID }}" \
+            --parameters 'commands=[
+              "cd /home/ec2-user",
+              "if [ ! -d devtrack-platform ]; then git clone https://github.com/ganeshdatti3384-cpu/devtrack_application.git; fi",
+              "cd devtrack-platform",
+              "git pull origin main",
+              "docker compose down",
+              "docker compose up -d --build"
+            ]' \
+            --query "Command.CommandId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          aws ssm wait command-executed \
+            --command-id $COMMAND_ID \
+            --instance-id ${{ secrets.EC2_INSTANCE_ID }} \
+            --region ${{ env.AWS_REGION }}
